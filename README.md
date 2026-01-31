@@ -5,11 +5,12 @@
 It's designed for Ansible developers and operators who need to work with different versions for different projects without the hassle of manually managing virtual environments or `ansible.cfg` files.
 
 ## Why `amvm`?
+
 If you've ever found yourself juggling multiple Ansible projects, you've likely faced these challenges:
 
--   Manually creating and activating Python `venv`s for each version (`source .../activate`).
--   Forgetting to activate the correct environment, leading to dependency errors.
--   Managing different `ansible.cfg` files for standard vs. Mitogen-enabled runs.
+- Forgetting to activate the correct environment, leading to dependency errors.
+- Managing different `ansible.cfg` files for standard vs. Mitogen-enabled runs.
+- Manually creating and activating Python `venv`s for each version (`source .../activate`).
 
 `amvm` solves these problems by automating the entire workflow.
 It's more than just a `venv` wrapper; it's a complete management tool that lets you **set your Ansible version once and forget about it**.
@@ -49,10 +50,12 @@ It's more than just a `venv` wrapper; it's a complete management tool that lets 
 ## Version Matrix
 `amvm` installs specific, tested combinations of packages. To use other versions, define them in your `~/.amvm.cfg`. To skip installing `ansible-lint` or `mitogen`, use `0` as the version number.
 
-| Key | `ansible` | `ansible-core` | `ansible-lint` | `mitogen` |
-|:---:|:---------:|:--------------:|:--------------:|:---------:|
-| `10` |  `10.7.0` |    `2.17.12`   |    `25.6.1`    |  `0.3.24` |
-| `11` |  `11.7.0` |    `2.18.6`    |    `25.6.1`    |  `0.3.24` |
+| Key |  `ansible` | `ansible-core` | `ansible-lint` | `mitogen` |
+|:---:|:----------:|:--------------:|:--------------:|:---------:|
+| `10` |  `10.7.0`  |    `2.17.14`   |    `26.1.1`    |  `0.3.39` |
+| `11` |  `11.13.0` |    `2.18.13`   |    `26.1.1`    |  `0.3.39` |
+| `12` |  `12.3.0`  |    `2.19.6`    |    `26.1.1`    |  `0.3.39` |
+| `13` |  `13.3.0`  |    `2.20.2`    |    `26.1.1`    |  `0.3.39` |
 
 ---
 
