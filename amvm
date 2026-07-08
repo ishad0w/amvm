@@ -5,13 +5,16 @@ DEFAULT_AMVM_ROOT="$HOME/.amvm"
 AMVM_ROOT="$DEFAULT_AMVM_ROOT"
 CONFIG_FILE="$HOME/.amvm.cfg"
 
-AMVM_VERSION="1.0.3"
+AMVM_VERSION="2.0.0"
+AMVM_DEFAULT_PYTHON_VERSION="3.12"
+AMVM_METADATA_FILE=".amvm.env"
 AMVM_CUSTOM_VERSIONS=()
 AMVM_BUILTIN_VERSIONS=(
-  "10:10.7.0|2.17.14|26.1.1|0.3.39"
-  "11:11.13.0|2.18.13|26.1.1|0.3.39"
-  "12:12.3.0|2.19.6|26.1.1|0.3.39"
-  "13:13.3.0|2.20.2|26.1.1|0.3.39"
+  "10:10.7.0|2.17.14|25.8.2|0.3.50|3.12"
+  "11:11.13.0|2.18.18|25.11.0|0.3.50|3.12"
+  "12:12.3.0|2.19.11|26.4.0|0.3.50|3.12"
+  "13:13.8.0|2.20.7|26.6.0|0.3.50|3.12"
+  "14:14.1.0|2.21.1|26.6.0|0.3.50|3.12"
 )
 
 C_RESET='\033[0m'
@@ -28,6 +31,7 @@ die() { c_err "$1"; exit 1; }
 
 get_version_data() {
   local key_to_find="$1"
+  local item
   for item in "${AMVM_BUILTIN_VERSIONS[@]}"; do
     if [[ "${item%%:*}" == "$key_to_find" ]]; then echo "${item#*:}"; return 0; fi
   done
@@ -35,7 +39,51 @@ get_version_data() {
 }
 
 get_all_versions() {
+  local item
   for item in "${AMVM_BUILTIN_VERSIONS[@]}"; do echo -n "${item%%:*} "; done
+}
+
+parse_version_string() {
+  local version_string="$1"
+  local extra=""
+  IFS='|' read -r ansible_ver core_ver lint_ver mitogen_ver python_ver extra <<<"$version_string"
+  python_ver="${python_ver:-$AMVM_DEFAULT_PYTHON_VERSION}"
+
+  if [[ -n "$extra" ]]; then
+    die "Invalid version string '$version_string': expected KEY:ansible|ansible-core|ansible-lint|mitogen[|python]."
+  fi
+  if [[ -z "$ansible_ver" || -z "$core_ver" || -z "$lint_ver" || -z "$mitogen_ver" ]]; then
+    die "Invalid version string '$version_string': expected KEY:ansible|ansible-core|ansible-lint|mitogen[|python]."
+  fi
+}
+
+normalize_version_string() {
+  local version_string="$1"
+  local ansible_ver core_ver lint_ver mitogen_ver python_ver
+  parse_version_string "$version_string"
+  printf "%s|%s|%s|%s|%s\n" "$ansible_ver" "$core_ver" "$lint_ver" "$mitogen_ver" "$python_ver"
+}
+
+get_builtin_key_for_ansible_version() {
+  local ansible_to_find="$1"
+  local item key ansible_ver core_ver lint_ver mitogen_ver python_ver
+  for item in "${AMVM_BUILTIN_VERSIONS[@]}"; do
+    key="${item%%:*}"
+    parse_version_string "${item#*:}"
+    if [[ "$ansible_ver" == "$ansible_to_find" ]]; then echo "$key"; return 0; fi
+  done
+  return 1
+}
+
+get_version_note() {
+  case "$1" in
+    10) echo "EOL; final 10.x package";;
+    11) echo "EOL Dec 2025; strict-era lint";;
+    12) echo "EOL Dec 2025; strict-era lint";;
+    13) echo "Final Ansible 13/core 2.20 line";;
+    14) echo "Current tested Ansible 14/core 2.21 line";;
+    *) echo "";;
+  esac
 }
 
 load_config() {
@@ -45,6 +93,12 @@ load_config() {
 
 ensure_dirs() {
   mkdir -p "$AMVM_ROOT" "$AMVM_ROOT/bin"
+}
+
+ensure_uv() {
+  if ! command -v uv >/dev/null 2>&1; then
+    die "amvm 2.0 requires 'uv' in PATH. Install uv first: https://docs.astral.sh/uv/getting-started/installation/"
+  fi
 }
 
 detect_shell_profile() {
@@ -86,7 +140,10 @@ COMMANDS:
   (no command)          Show an interactive menu to switch the active version.
   --install <ver>       Install a built-in Ansible version.
                         <ver> can be: $(get_all_versions | sed 's/ /, /g; s/, $//'), or all.
+  --reinstall <ver>     Remove and reinstall a built-in Ansible version.
+                        <ver> can be: $(get_all_versions | sed 's/ /, /g; s/, $//'), or all.
   --install-custom <k>  Install a user-defined version by its key from ~/.amvm.cfg.
+  --matrix              Print the built-in compatibility matrix.
   --uninstall           Interactively uninstall a specific version.
   --list                List all installed versions.
   --cleanup             Remove ALL amvm environments, shims, and configurations.
@@ -99,45 +156,169 @@ print_version() {
   printf "amvm v%s\n" "$AMVM_VERSION"
 }
 
+print_matrix() {
+  local item key note ansible_ver core_ver lint_ver mitogen_ver python_ver
+  printf "%-5s %-11s %-14s %-14s %-10s %-8s %s\n" "KEY" "ANSIBLE" "ANSIBLE-CORE" "ANSIBLE-LINT" "MITOGEN" "PYTHON" "NOTES"
+  printf "%-5s %-11s %-14s %-14s %-10s %-8s %s\n" "---" "-------" "------------" "------------" "-------" "------" "-----"
+  for item in "${AMVM_BUILTIN_VERSIONS[@]}"; do
+    key="${item%%:*}"
+    parse_version_string "${item#*:}"
+    note=$(get_version_note "$key")
+    printf "%-5s %-11s %-14s %-14s %-10s %-8s %s\n" "$key" "$ansible_ver" "$core_ver" "$lint_ver" "$mitogen_ver" "$python_ver" "$note"
+  done
+}
+
+_metadata_value() {
+  local metadata_file="$1"
+  local key="$2"
+  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$metadata_file" 2>/dev/null
+}
+
+_write_install_metadata() {
+  local venv_dir="$1"
+  local version_key="$2"
+  local ansible_ver="$3"
+  local core_ver="$4"
+  local lint_ver="$5"
+  local mitogen_ver="$6"
+  local python_ver="$7"
+  local metadata_file="$venv_dir/$AMVM_METADATA_FILE"
+
+  {
+    printf "amvm_version=%s\n" "$AMVM_VERSION"
+    printf "key=%s\n" "$version_key"
+    printf "ansible=%s\n" "$ansible_ver"
+    printf "ansible_core=%s\n" "$core_ver"
+    printf "ansible_lint=%s\n" "$lint_ver"
+    printf "mitogen=%s\n" "$mitogen_ver"
+    printf "python=%s\n" "$python_ver"
+    printf "installer=uv\n"
+  } >"$metadata_file"
+}
+
+_environment_matches() {
+  local venv_dir="$1"
+  local version_string="$2"
+  local ansible_ver core_ver lint_ver mitogen_ver python_ver
+  local metadata_file="$venv_dir/$AMVM_METADATA_FILE"
+
+  [[ -f "$metadata_file" ]] || return 1
+  parse_version_string "$version_string"
+
+  [[ "$(_metadata_value "$metadata_file" ansible)" == "$ansible_ver" ]] || return 1
+  [[ "$(_metadata_value "$metadata_file" ansible_core)" == "$core_ver" ]] || return 1
+  [[ "$(_metadata_value "$metadata_file" ansible_lint)" == "$lint_ver" ]] || return 1
+  [[ "$(_metadata_value "$metadata_file" mitogen)" == "$mitogen_ver" ]] || return 1
+  [[ "$(_metadata_value "$metadata_file" python)" == "$python_ver" ]] || return 1
+  [[ "$(_metadata_value "$metadata_file" installer)" == "uv" ]] || return 1
+}
+
+_describe_installed_environment() {
+  local env_name="$1"
+  local venv_dir="$AMVM_ROOT/$env_name"
+  local metadata_file="$venv_dir/$AMVM_METADATA_FILE"
+  local ansible_installed="${env_name#ansible-}"
+  local key desired metadata_key
+
+  if [[ -f "$metadata_file" ]]; then
+    metadata_key=$(_metadata_value "$metadata_file" key)
+    if [[ -n "$metadata_key" ]]; then
+      if desired=$(get_version_data "$metadata_key" 2>/dev/null); then
+        if _environment_matches "$venv_dir" "$desired"; then
+          printf "%s" "built-in $metadata_key"
+        else
+          printf "%s" "stale built-in $metadata_key; run: amvm --reinstall $metadata_key"
+        fi
+      else
+        printf "%s" "custom $metadata_key"
+      fi
+    else
+      printf "%s" "metadata present"
+    fi
+    return
+  fi
+
+  key=$(get_builtin_key_for_ansible_version "$ansible_installed" || true)
+
+  if [[ -n "$key" ]]; then
+    desired=$(get_version_data "$key")
+    if _environment_matches "$AMVM_ROOT/$env_name" "$desired"; then
+      printf "%s" "built-in $key"
+    else
+      printf "%s" "stale built-in $key; run: amvm --reinstall $key"
+    fi
+  else
+    printf "%s" "legacy or custom"
+  fi
+}
+
 _get_installed_versions() {
   local installed=()
+  local d
   while IFS= read -r -d '' d; do
     installed+=("$(basename "$d")")
   done < <(find "$AMVM_ROOT" -mindepth 1 -maxdepth 1 -type d -name "ansible-*" -print0 2>/dev/null)
-  
+
   if [[ ${#installed[@]} -gt 0 ]]; then
-    printf "%s\n" "${installed[@]}" | sort -t- -k2 -Vr
+    if sort -V </dev/null >/dev/null 2>&1; then
+      printf "%s\n" "${installed[@]}" | sort -t- -k2 -Vr
+    else
+      printf "%s\n" "${installed[@]}" | sort -r
+    fi
+  fi
+}
+
+_remove_environment_dir() {
+  local venv_name="$1"
+  local venv_dir="$AMVM_ROOT/$venv_name"
+  if [[ -d "$venv_dir" ]]; then
+    c_info "Removing environment: $venv_name..."
+    rm -rf "$venv_dir"
   fi
 }
 
 _perform_install() {
   local version_string="$1"
-  local ansible_ver core_ver lint_ver mitogen_ver
-  IFS='|' read -r ansible_ver core_ver lint_ver mitogen_ver <<<"$version_string"
+  local version_key="${2:-custom}"
+  local normalized_version_string ansible_ver core_ver lint_ver mitogen_ver python_ver
+  normalized_version_string=$(normalize_version_string "$version_string")
+  parse_version_string "$normalized_version_string"
 
   if [[ -z "$ansible_ver" || "$ansible_ver" == "0" || -z "$core_ver" || "$core_ver" == "0" ]]; then
     die "Invalid version string: ansible and ansible-core versions are mandatory."
   fi
 
+  ensure_uv
+  ensure_dirs
+
   local venv_name="ansible-${ansible_ver}"
   local venv_dir="$AMVM_ROOT/${venv_name}"
 
   if [[ -d "$venv_dir" ]]; then
-    c_warn "Environment '$venv_name' already exists. Skipping."
+    if _environment_matches "$venv_dir" "$normalized_version_string"; then
+      c_warn "Environment '$venv_name' already exists and matches the requested matrix. Skipping."
+    else
+      c_warn "Environment '$venv_name' already exists but does not match the requested matrix."
+      local builtin_version_data=""
+      if builtin_version_data=$(get_version_data "$version_key" 2>/dev/null) && [[ "$(normalize_version_string "$builtin_version_data")" == "$normalized_version_string" ]]; then
+        c_warn "Run 'amvm --reinstall $version_key' to rebuild it with uv and current pins."
+      else
+        c_warn "Remove it with 'amvm --uninstall' before reinstalling the custom entry."
+      fi
+    fi
     return
   fi
+
   trap 'c_err "Installation of $venv_name failed. Cleaning up..."; rm -rf "$venv_dir";' ERR INT TERM
 
-  c_info "=== Creating environment: $venv_name ==="
-  python3 -m venv "$venv_dir"
-  source "$venv_dir/bin/activate"
+  c_info "=== Creating uv-managed environment: $venv_name (Python $python_ver) ==="
+  uv venv --managed-python --python "$python_ver" "$venv_dir"
 
   c_info "--- Installing packages for Ansible $ansible_ver ---"
-  pip install --upgrade pip
   local packages_to_install=("cffi" "jmespath" "boto3" "pywinrm" "ansible==${ansible_ver}" "ansible-core==${core_ver}")
   if [[ "$lint_ver" != "0" ]]; then packages_to_install+=("ansible-lint==${lint_ver}"); fi
   if [[ "$mitogen_ver" != "0" ]]; then packages_to_install+=("mitogen==${mitogen_ver}"); fi
-  pip install "${packages_to_install[@]}"
+  uv pip install --python "$venv_dir/bin/python" "${packages_to_install[@]}"
 
   c_info "--- Writing configuration files ---"
   local cache_dir="/tmp/${venv_name}-cache"
@@ -152,7 +333,7 @@ EOL
   if [[ "$mitogen_ver" != "0" ]]; then
     c_info "--- Locating Mitogen strategy plugin path ---"
     local site_packages
-    site_packages=$("$venv_dir/bin/python3" -c 'import site; print(site.getsitepackages()[0])')
+    site_packages=$("$venv_dir/bin/python" -c 'import site; print(site.getsitepackages()[0])')
     local mitogen_path
     mitogen_path=$(find "$site_packages" -type d -name 'ansible_mitogen' | head -n1)/plugins/strategy
     if [[ ! -d "$mitogen_path" ]]; then
@@ -171,7 +352,7 @@ EOL
     fi
   fi
 
-  deactivate
+  _write_install_metadata "$venv_dir" "$version_key" "$ansible_ver" "$core_ver" "$lint_ver" "$mitogen_ver" "$python_ver"
   c_ok "✅ Environment '$venv_name' created successfully."
   echo
   trap - ERR INT TERM
@@ -181,13 +362,55 @@ handle_install() {
   local arg_ver="${1:-}"
   if [[ -z "$arg_ver" ]]; then die "The '--install' command requires a version. Available: $(get_all_versions | sed 's/ /, /g; s/, $//'), or all."; fi
   if [[ "$arg_ver" == "all" ]]; then
-    for major in $(get_all_versions); do _perform_install "$(get_version_data "$major")"; done
+    local major
+    for major in $(get_all_versions); do _perform_install "$(get_version_data "$major")" "$major"; done
   else
     local version_data
     version_data=$(get_version_data "$arg_ver") || die "Unsupported built-in version '$arg_ver'. Available: $(get_all_versions | sed 's/ /, /g; s/, $//')."
-    _perform_install "$version_data"
+    _perform_install "$version_data" "$arg_ver"
   fi
-  c_ok "Installation complete."
+  c_ok "✅ Installation complete."
+}
+
+confirm_reinstall() {
+  local label="$1"
+  local response
+  read -r -p "Remove and rebuild $label? [y/N] " response
+  if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+    c_info "✋ Reinstall cancelled."
+    exit 0
+  fi
+}
+
+handle_reinstall() {
+  local arg_ver="${1:-}"
+  if [[ -z "$arg_ver" ]]; then die "The '--reinstall' command requires a version. Available: $(get_all_versions | sed 's/ /, /g; s/, $//'), or all."; fi
+
+  if [[ "$arg_ver" == "all" ]]; then
+    c_warn "This will remove and rebuild every current built-in environment target:"
+    local major version_data ansible_ver core_ver lint_ver mitogen_ver python_ver
+    for major in $(get_all_versions); do
+      version_data=$(get_version_data "$major")
+      parse_version_string "$version_data"
+      printf "  - ansible-%s (key %s)\n" "$ansible_ver" "$major"
+    done
+    confirm_reinstall "all built-in environments"
+    for major in $(get_all_versions); do
+      version_data=$(get_version_data "$major")
+      parse_version_string "$version_data"
+      _remove_environment_dir "ansible-${ansible_ver}"
+      _perform_install "$version_data" "$major"
+    done
+  else
+    local version_data ansible_ver core_ver lint_ver mitogen_ver python_ver
+    version_data=$(get_version_data "$arg_ver") || die "Unsupported built-in version '$arg_ver'. Available: $(get_all_versions | sed 's/ /, /g; s/, $//')."
+    parse_version_string "$version_data"
+    c_warn "This will remove and rebuild ansible-${ansible_ver}."
+    confirm_reinstall "ansible-${ansible_ver}"
+    _remove_environment_dir "ansible-${ansible_ver}"
+    _perform_install "$version_data" "$arg_ver"
+  fi
+  c_ok "✅ Reinstall complete."
 }
 
 handle_install_custom() {
@@ -195,12 +418,33 @@ handle_install_custom() {
   if [[ -z "$key_to_install" ]]; then die "The '--install-custom' command requires a key."; fi
   if [[ ${#AMVM_CUSTOM_VERSIONS[@]} -eq 0 ]]; then die "No custom versions defined in ~/.amvm.cfg via AMVM_CUSTOM_VERSIONS array."; fi
   local version_string=""
+  local item
   for item in "${AMVM_CUSTOM_VERSIONS[@]}"; do
     if [[ "${item%%:*}" == "$key_to_install" ]]; then version_string="${item#*:}"; break; fi
   done
   if [[ -z "$version_string" ]]; then die "Custom version key '$key_to_install' not found in ~/.amvm.cfg."; fi
-  _perform_install "$version_string"
-  c_ok "Custom installation complete."
+  _perform_install "$version_string" "$key_to_install"
+  c_ok "✅ Custom installation complete."
+}
+
+_link_ansible_shims() {
+  local venv_dir="$1"
+  local shim_dir="$AMVM_ROOT/bin"
+  mkdir -p "$shim_dir"
+  rm -f "$shim_dir"/ansible*
+  local venv_bin="$venv_dir/bin"
+  while IFS= read -r -d '' exe; do
+    local shim="$shim_dir/$(basename "$exe")"
+    local quoted_venv_bin quoted_exe
+    printf -v quoted_venv_bin "%q" "$venv_bin"
+    printf -v quoted_exe "%q" "$exe"
+    cat <<EOL >"$shim"
+#!/usr/bin/env bash
+export PATH=${quoted_venv_bin}:\${PATH}
+exec ${quoted_exe} "\$@"
+EOL
+    chmod +x "$shim"
+  done < <(find "$venv_dir/bin" -maxdepth 1 \( -type f -o -type l \) -name "ansible*" -print0)
 }
 
 handle_switch() {
@@ -212,8 +456,10 @@ handle_switch() {
     exit 1
   fi
   local dirs=()
+  local line
   while IFS= read -r line; do dirs+=("$line"); done <<< "$installed_versions_str"
   local choices=()
+  local v
   for v in "${dirs[@]}"; do
     choices+=("$v")
     if [[ -f "$AMVM_ROOT/$v/ansible-mitogen.cfg" ]]; then choices+=("$v (mitogen)"); fi
@@ -223,6 +469,7 @@ handle_switch() {
   if command -v fzf >/dev/null 2>&1; then
     selection=$(printf "%s\n" "${choices[@]}" | fzf --height=15 --reverse --prompt="amvm> ")
   else
+    local i
     for i in "${!choices[@]}"; do printf "  %2d) %s\n" "$((i + 1))" "${choices[i]}"; done
     local num_selection
     read -r -p "Enter a number: " num_selection
@@ -241,11 +488,7 @@ handle_switch() {
   else target_cfg="$venv_dir/ansible.cfg"; fi
   [[ -f "$target_cfg" ]] || die "Config file not found: $target_cfg"
   ln -sf "$target_cfg" "$HOME/.ansible.cfg"
-  local shim_dir="$AMVM_ROOT/bin"
-  rm -f "$shim_dir"/ansible*
-  while IFS= read -r -d '' exe; do
-    ln -s "$exe" "$shim_dir/$(basename "$exe")"
-  done < <(find "$venv_dir/bin" -maxdepth 1 -type f -name "ansible*" -print0)
+  _link_ansible_shims "$venv_dir"
   local suffix=""
   if [[ "$use_custom" == true ]]; then suffix=" (custom)"; fi
   if [[ "$use_mitogen" == true ]]; then suffix=" (mitogen)"; fi
@@ -259,12 +502,14 @@ handle_uninstall() {
   installed_versions_str=$(_get_installed_versions)
   if [[ -z "$installed_versions_str" ]]; then c_warn "⚠️  No Ansible environments found to uninstall."; exit 1; fi
   local choices=()
+  local line
   while IFS= read -r line; do choices+=("$line"); done <<< "$installed_versions_str"
   c_info "Select an environment to uninstall:"
   local version_to_remove
   if command -v fzf >/dev/null 2>&1; then
     version_to_remove=$(printf "%s\n" "${choices[@]}" | fzf --height=15 --reverse --prompt="uninstall> ")
   else
+    local i
     for i in "${!choices[@]}"; do printf "  %2d) %s\n" "$((i + 1))" "${choices[i]}"; done
     local num_selection
     read -r -p "Enter a number: " num_selection
@@ -272,8 +517,9 @@ handle_uninstall() {
     version_to_remove="${choices[num_selection - 1]}"
   fi
   if [[ -z "$version_to_remove" ]]; then c_info "✋ Uninstall cancelled."; exit 0; fi
+  local response
   read -r -p "Are you sure you want to PERMANENTLY remove '$version_to_remove'? [y/N] " response
-  if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then c_info "Uninstall cancelled."; exit 0; fi
+  if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then c_info "✋ Uninstall cancelled."; exit 0; fi
   local venv_dir="$AMVM_ROOT/$version_to_remove"
   local shim_dir="$AMVM_ROOT/bin"
   local was_active=false
@@ -300,7 +546,11 @@ handle_list() {
     return
   fi
   c_info "Installed environments in '$AMVM_ROOT':"
-  echo "$installed_versions_str" | sed 's/^/  - /'
+  local env_name description
+  while IFS= read -r env_name; do
+    description=$(_describe_installed_environment "$env_name")
+    printf "  - %-20s %s\n" "$env_name" "($description)"
+  done <<< "$installed_versions_str"
 }
 
 handle_cleanup() {
@@ -316,8 +566,9 @@ handle_cleanup() {
   echo "  - Shims directory: $AMVM_ROOT/bin"
   if [[ -e "$HOME/.ansible.cfg" ]]; then echo "  - Ansible config symlink: $HOME/.ansible.cfg"; fi
   echo
+  local response
   read -r -p "Are you sure you want to remove all of the above? [y/N] " response
-  if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then c_info "Cleanup cancelled."; exit 0; fi
+  if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then c_info "✋ Cleanup cancelled."; exit 0; fi
   c_info "Removing directory $AMVM_ROOT..."
   rm -rf "$AMVM_ROOT"
   c_info "Removing config file ~/.ansible.cfg..."
@@ -328,16 +579,17 @@ handle_cleanup() {
 
 main() {
   load_config
-  ensure_dirs
   local command=${1:-}
   case "$command" in
-    --install|--install-custom|--uninstall|--cleanup) ;;
+    --install|--install-custom|--reinstall|--uninstall|--list|--cleanup|--matrix|-h|--help|-v|--version) ;;
     *) check_path_and_warn;;
   esac
   local arg=${2:-}
   case "$command" in
   --install)          handle_install "$arg"; check_path_and_warn;;
+  --reinstall)        handle_reinstall "$arg"; check_path_and_warn;;
   --install-custom)   handle_install_custom "$arg"; check_path_and_warn;;
+  --matrix)           print_matrix;;
   --uninstall)        handle_uninstall;;
   --list)             handle_list;;
   --cleanup)          handle_cleanup;;
