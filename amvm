@@ -3,18 +3,19 @@ set -euo pipefail
 
 DEFAULT_AMVM_ROOT="$HOME/.amvm"
 AMVM_ROOT="$DEFAULT_AMVM_ROOT"
-CONFIG_FILE="$HOME/.amvm.cfg"
+CONFIG_FILE="${AMVM_CONFIG_FILE:-$HOME/.amvm.cfg}"
 
-AMVM_VERSION="2.0.0"
+AMVM_VERSION="2.1.0"
 AMVM_DEFAULT_PYTHON_VERSION="3.12"
 AMVM_METADATA_FILE=".amvm.env"
 AMVM_CUSTOM_VERSIONS=()
+# Format: KEY:ANSIBLE_VERSION|ANSIBLE_CORE_VERSION|ANSIBLE_LINT_VERSION|MITOGEN_VERSION|PYTHON_VERSION
 AMVM_BUILTIN_VERSIONS=(
-  "10:10.7.0|2.17.14|25.8.2|0.3.50|3.12"
-  "11:11.13.0|2.18.18|25.11.0|0.3.50|3.12"
-  "12:12.3.0|2.19.11|26.4.0|0.3.50|3.12"
-  "13:13.8.0|2.20.7|26.6.0|0.3.50|3.12"
-  "14:14.1.0|2.21.1|26.6.0|0.3.50|3.12"
+  "10:10.7.0|2.17.14|25.8.2|0.3.53|3.12.13"
+  "11:11.13.0|2.18.19|26.8.0|0.3.53|3.12.13"
+  "12:12.3.0|2.19.12|26.8.0|0.3.53|3.12.13"
+  "13:13.8.0|2.20.8|26.8.0|0.3.53|3.12.13"
+  "14:14.3.1|2.21.3|26.8.0|0.3.53|3.12.13"
 )
 
 C_RESET='\033[0m'
@@ -40,7 +41,9 @@ get_version_data() {
 
 get_all_versions() {
   local item
-  for item in "${AMVM_BUILTIN_VERSIONS[@]}"; do echo -n "${item%%:*} "; done
+  for item in "${AMVM_BUILTIN_VERSIONS[@]}"; do
+    [[ "${item%%:*}" == 10 ]] || echo -n "${item%%:*} "
+  done
 }
 
 parse_version_string() {
@@ -55,6 +58,11 @@ parse_version_string() {
   if [[ -z "$ansible_ver" || -z "$core_ver" || -z "$lint_ver" || -z "$mitogen_ver" ]]; then
     die "Invalid version string '$version_string': expected KEY:ansible|ansible-core|ansible-lint|mitogen[|python]."
   fi
+  local value
+  for value in "$ansible_ver" "$core_ver" "$lint_ver" "$mitogen_ver"; do
+    [[ "$value" =~ ^[0-9][a-zA-Z0-9.!+_-]*$ ]] || die "Expected an exact package version: $value"
+  done
+  [[ "$python_ver" =~ ^3\.[0-9]+(\.[0-9]+)?$ ]] || die "Expected Python 3.minor[.patch]."
 }
 
 normalize_version_string() {
@@ -77,9 +85,9 @@ get_builtin_key_for_ansible_version() {
 
 get_version_note() {
   case "$1" in
-    10) echo "EOL; final 10.x package";;
-    11) echo "EOL Dec 2025; strict-era lint";;
-    12) echo "EOL Dec 2025; strict-era lint";;
+    10) echo "Legacy only; known CVEs; excluded from all";;
+    11) echo "Community EOL; core EOL May 2026";;
+    12) echo "Community EOL; core security fixes until Nov 2026";;
     13) echo "Final Ansible 13/core 2.20 line";;
     14) echo "Current tested Ansible 14/core 2.21 line";;
     *) echo "";;
@@ -87,8 +95,14 @@ get_version_note() {
 }
 
 load_config() {
+  # shellcheck disable=SC1090
   if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; fi
   AMVM_ROOT="${AMVM_ROOT/#\~/$HOME}"
+  [[ -n "$AMVM_ROOT" && "$AMVM_ROOT" != *$'\n'* ]] || die "Invalid AMVM_ROOT."
+  [[ "$AMVM_ROOT" == /* ]] || AMVM_ROOT="$PWD/$AMVM_ROOT"
+  if [[ -d "$AMVM_ROOT" ]]; then AMVM_ROOT=$(cd "$AMVM_ROOT" && pwd -P); fi
+  [[ "$AMVM_ROOT" != / && "$AMVM_ROOT" != "$(cd "$HOME" && pwd -P)" ]] || die "AMVM_ROOT cannot be / or your home directory."
+  [[ ! -L "$AMVM_ROOT/bin" ]] || die "The amvm bin directory must not be a symlink."
 }
 
 ensure_dirs() {
@@ -121,7 +135,10 @@ check_path_and_warn() {
       c_warn "⚠️  Warning: Directory '$shim_dir' is not in your \$PATH."
       c_warn "   To use your installed Ansible versions, add it to your shell profile."
       printf "   Run this command and restart your terminal:\n"
-      printf "   %s\n" "echo 'export PATH=\"${shim_dir}:\$PATH\"' >> \"${profile_file}\""
+      local path_export
+      # shellcheck disable=SC2016
+      printf -v path_export 'export PATH=%q:"$PATH"' "$shim_dir"
+      printf '   printf "%%s\\n" %q >> %q\n' "$path_export" "$profile_file"
       echo
       ;;
   esac
@@ -140,13 +157,14 @@ COMMANDS:
   (no command)          Show an interactive menu to switch the active version.
   --install <ver>       Install a built-in Ansible version.
                         <ver> can be: $(get_all_versions | sed 's/ /, /g; s/, $//'), or all.
-  --reinstall <ver>     Remove and reinstall a built-in Ansible version.
+                        Legacy 10 requires explicit selection and has known CVEs.
+  --reinstall <ver>     Rebuild a built-in version, with rollback on failure.
                         <ver> can be: $(get_all_versions | sed 's/ /, /g; s/, $//'), or all.
   --install-custom <k>  Install a user-defined version by its key from ~/.amvm.cfg.
   --matrix              Print the built-in compatibility matrix.
   --uninstall           Interactively uninstall a specific version.
   --list                List all installed versions.
-  --cleanup             Remove ALL amvm environments, shims, and configurations.
+  --cleanup             Remove recognized amvm data, preserving unrelated files.
   --help, -h            Show this help message.
   --version, -v         Show version.
 EOF
@@ -211,6 +229,20 @@ _environment_matches() {
   [[ "$(_metadata_value "$metadata_file" mitogen)" == "$mitogen_ver" ]] || return 1
   [[ "$(_metadata_value "$metadata_file" python)" == "$python_ver" ]] || return 1
   [[ "$(_metadata_value "$metadata_file" installer)" == "uv" ]] || return 1
+  [[ -x "$venv_dir/bin/python" && -x "$venv_dir/bin/ansible" ]] || return 1
+  "$venv_dir/bin/python" - "$ansible_ver" "$core_ver" "$lint_ver" "$mitogen_ver" "$python_ver" <<'PY'
+import importlib.metadata as m
+import sys
+for name, expected in zip(('ansible', 'ansible-core', 'ansible-lint', 'mitogen'), sys.argv[1:5]):
+    try:
+        actual = m.version(name)
+    except m.PackageNotFoundError:
+        actual = '0'
+    if actual != expected:
+        sys.exit(1)
+expected_python = tuple(map(int, sys.argv[5].split('.')))
+sys.exit(0 if sys.version_info[:len(expected_python)] == expected_python else 1)
+PY
 }
 
 _describe_installed_environment() {
@@ -223,8 +255,10 @@ _describe_installed_environment() {
   if [[ -f "$metadata_file" ]]; then
     metadata_key=$(_metadata_value "$metadata_file" key)
     if [[ -n "$metadata_key" ]]; then
-      if desired=$(get_version_data "$metadata_key" 2>/dev/null); then
-        if _environment_matches "$venv_dir" "$desired"; then
+      if [[ "$env_name" != *-custom-* ]] && desired=$(get_version_data "$metadata_key" 2>/dev/null); then
+        if [[ "$env_name" != "ansible-${desired%%|*}" ]]; then
+          printf "%s" "older built-in $metadata_key; current target: ansible-${desired%%|*}"
+        elif _environment_matches "$venv_dir" "$desired"; then
           printf "%s" "built-in $metadata_key"
         else
           printf "%s" "stale built-in $metadata_key; run: amvm --reinstall $metadata_key"
@@ -252,11 +286,21 @@ _describe_installed_environment() {
   fi
 }
 
+_managed_environment() {
+  local dir="$1" version key
+  [[ -d "$dir" && ! -L "$dir" && -O "$dir" && -f "$dir/$AMVM_METADATA_FILE" && ! -L "$dir/$AMVM_METADATA_FILE" && -f "$dir/pyvenv.cfg" ]] || return 1
+  [[ "$(_metadata_value "$dir/$AMVM_METADATA_FILE" installer)" == uv ]] || return 1
+  version=$(_metadata_value "$dir/$AMVM_METADATA_FILE" ansible)
+  key=$(_metadata_value "$dir/$AMVM_METADATA_FILE" key)
+  [[ "$version" =~ ^[0-9][a-zA-Z0-9.!+_-]*$ && "$key" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || return 1
+  [[ "$dir" == "$AMVM_ROOT/ansible-$version" || "$dir" == "$AMVM_ROOT/ansible-$version-custom-$key" ]]
+}
+
 _get_installed_versions() {
   local installed=()
   local d
   while IFS= read -r -d '' d; do
-    installed+=("$(basename "$d")")
+    if _managed_environment "$d"; then installed+=("$(basename "$d")"); fi
   done < <(find "$AMVM_ROOT" -mindepth 1 -maxdepth 1 -type d -name "ansible-*" -print0 2>/dev/null)
 
   if [[ ${#installed[@]} -gt 0 ]]; then
@@ -271,15 +315,50 @@ _get_installed_versions() {
 _remove_environment_dir() {
   local venv_name="$1"
   local venv_dir="$AMVM_ROOT/$venv_name"
+  _managed_environment "$venv_dir" || die "Refusing to remove an unrecognized environment: $venv_dir"
   if [[ -d "$venv_dir" ]]; then
+    if [[ "$(_active_environment)" == "$venv_dir" ]]; then
+      _remove_owned_shims
+      if [[ -L "$AMVM_ROOT/.amvm-active" ]]; then rm -f "$AMVM_ROOT/.amvm-active"; fi
+      c_warn "Active version removed. Run amvm to select another environment."
+    fi
+    if [[ -L "$HOME/.ansible.cfg" ]]; then
+      case "$(readlink "$HOME/.ansible.cfg")" in
+        "$venv_dir/ansible.cfg"|"$venv_dir/ansible-mitogen.cfg"|"$venv_dir/ansible-customized.cfg") rm -f "$HOME/.ansible.cfg";;
+      esac
+    fi
     c_info "Removing environment: $venv_name..."
     rm -rf "$venv_dir"
   fi
 }
 
+_run_uv() {
+  local status=0
+  uv "$@" &
+  AMVM_UV_PID=$!
+  wait "$AMVM_UV_PID" || status=$?
+  AMVM_UV_PID=""
+  return "$status"
+}
+
+_stop_uv() {
+  if [[ -n "${AMVM_UV_PID:-}" ]]; then
+    kill "$AMVM_UV_PID" 2>/dev/null || true
+    wait "$AMVM_UV_PID" 2>/dev/null || true
+    AMVM_UV_PID=""
+  fi
+}
+
+_release_lock() {
+  _stop_uv
+  rm -f "$AMVM_ROOT/.amvm-lock/pid"
+  rmdir "$AMVM_ROOT/.amvm-lock"
+}
+
 _perform_install() {
   local version_string="$1"
   local version_key="${2:-custom}"
+  local reinstall="${3:-false}" custom="${4:-false}"
   local normalized_version_string ansible_ver core_ver lint_ver mitogen_ver python_ver
   normalized_version_string=$(normalize_version_string "$version_string")
   parse_version_string "$normalized_version_string"
@@ -292,10 +371,15 @@ _perform_install() {
   ensure_dirs
 
   local venv_name="ansible-${ansible_ver}"
+  [[ "$custom" != true ]] || venv_name+="-custom-$version_key"
   local venv_dir="$AMVM_ROOT/${venv_name}"
 
-  if [[ -d "$venv_dir" ]]; then
+  if [[ -e "$venv_dir" || -L "$venv_dir" ]]; then
+    _managed_environment "$venv_dir" || die "Refusing to replace an unrecognized environment: $venv_dir"
+  fi
+  if [[ -d "$venv_dir" && "$reinstall" != true ]]; then
     if _environment_matches "$venv_dir" "$normalized_version_string"; then
+      _run_uv pip check --python "$venv_dir/bin/python"
       c_warn "Environment '$venv_name' already exists and matches the requested matrix. Skipping."
     else
       c_warn "Environment '$venv_name' already exists but does not match the requested matrix."
@@ -305,28 +389,55 @@ _perform_install() {
       else
         c_warn "Remove it with 'amvm --uninstall' before reinstalling the custom entry."
       fi
+      return 1
     fi
     return
   fi
 
-  trap 'c_err "Installation of $venv_name failed. Cleaning up..."; rm -rf "$venv_dir";' ERR INT TERM
+  AMVM_INSTALL_BACKUP="" AMVM_INSTALL_BUILDING=false AMVM_INSTALL_DIR="$venv_dir"
+  _finish_install() {
+    local status=$?
+    trap - EXIT INT TERM
+    _stop_uv
+    if [[ "$status" != 0 && "$AMVM_INSTALL_BUILDING" == true ]]; then rm -rf "$AMVM_INSTALL_DIR"; fi
+    if [[ -n "$AMVM_INSTALL_BACKUP" ]]; then
+      if [[ "$status" != 0 && -d "$AMVM_INSTALL_BACKUP/environment" ]]; then
+        mv "$AMVM_INSTALL_BACKUP/environment" "$AMVM_INSTALL_DIR" || { c_err "Restore $AMVM_INSTALL_BACKUP/environment manually."; _release_lock; exit "$status"; }
+      fi
+      rm -rf "$AMVM_INSTALL_BACKUP"
+    fi
+    _release_lock
+    exit "$status"
+  }
+  trap _finish_install EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [[ -d "$venv_dir" ]]; then
+    AMVM_INSTALL_BACKUP=$(mktemp -d "$AMVM_ROOT/.amvm-reinstall.XXXXXX")
+    mv "$venv_dir" "$AMVM_INSTALL_BACKUP/environment"
+  fi
+  AMVM_INSTALL_BUILDING=true
 
   c_info "=== Creating uv-managed environment: $venv_name (Python $python_ver) ==="
-  uv venv --managed-python --python "$python_ver" "$venv_dir"
+  _run_uv venv --managed-python --python "$python_ver" "$venv_dir"
 
   c_info "--- Installing packages for Ansible $ansible_ver ---"
-  local packages_to_install=("cffi" "jmespath" "boto3" "pywinrm" "ansible==${ansible_ver}" "ansible-core==${core_ver}")
+  local packages_to_install=("cffi==2.1.1" "jmespath==1.1.0" "boto3==1.43.89" "pywinrm==0.5.0" "ansible==${ansible_ver}" "ansible-core==${core_ver}")
   if [[ "$lint_ver" != "0" ]]; then packages_to_install+=("ansible-lint==${lint_ver}"); fi
   if [[ "$mitogen_ver" != "0" ]]; then packages_to_install+=("mitogen==${mitogen_ver}"); fi
-  uv pip install --python "$venv_dir/bin/python" "${packages_to_install[@]}"
+  if [[ -n "$AMVM_INSTALL_BACKUP" && -f "$AMVM_INSTALL_BACKUP/environment/.amvm.requirements.txt" ]] && _environment_matches "$AMVM_INSTALL_BACKUP/environment" "$normalized_version_string"; then
+    _run_uv pip install --python "$venv_dir/bin/python" --strict -r "$AMVM_INSTALL_BACKUP/environment/.amvm.requirements.txt"
+  else
+    _run_uv pip install --python "$venv_dir/bin/python" --strict "${packages_to_install[@]}"
+  fi
+  _run_uv pip check --python "$venv_dir/bin/python"
+  _run_uv pip freeze --python "$venv_dir/bin/python" >"$venv_dir/.amvm.requirements.txt"
 
   c_info "--- Writing configuration files ---"
-  local cache_dir="/tmp/${venv_name}-cache"
   cat <<EOL >"$venv_dir/ansible.cfg"
 [defaults]
-gathering = smart
-fact_caching = jsonfile
-fact_caching_connection = ${cache_dir}
+gathering = implicit
+fact_caching = memory
 forks = 10
 EOL
 
@@ -337,30 +448,35 @@ EOL
     local mitogen_path
     mitogen_path=$(find "$site_packages" -type d -name 'ansible_mitogen' | head -n1)/plugins/strategy
     if [[ ! -d "$mitogen_path" ]]; then
-      c_warn "Could not find Mitogen strategy plugin. Mitogen config will not be created."
+      die "Could not find the requested Mitogen strategy plugin."
     else
       c_info "Mitogen plugin found at: $mitogen_path"
       cat <<EOL >"$venv_dir/ansible-mitogen.cfg"
 [defaults]
 strategy_plugins = ${mitogen_path}
 strategy = mitogen_linear
-gathering = smart
-fact_caching = jsonfile
-fact_caching_connection = ${cache_dir}
+gathering = implicit
+fact_caching = memory
 forks = 10
 EOL
     fi
   fi
 
   _write_install_metadata "$venv_dir" "$version_key" "$ansible_ver" "$core_ver" "$lint_ver" "$mitogen_ver" "$python_ver"
+  _environment_matches "$venv_dir" "$normalized_version_string"
+  if [[ -n "$AMVM_INSTALL_BACKUP" ]] && [[ -f "$AMVM_INSTALL_BACKUP/environment/ansible-customized.cfg" || -L "$AMVM_INSTALL_BACKUP/environment/ansible-customized.cfg" ]]; then
+    cp -Pp "$AMVM_INSTALL_BACKUP/environment/ansible-customized.cfg" "$venv_dir/ansible-customized.cfg"
+  fi
+  trap _release_lock EXIT
+  if [[ -n "$AMVM_INSTALL_BACKUP" ]]; then rm -rf "$AMVM_INSTALL_BACKUP"; fi
   c_ok "✅ Environment '$venv_name' created successfully."
   echo
-  trap - ERR INT TERM
 }
 
 handle_install() {
   local arg_ver="${1:-}"
   if [[ -z "$arg_ver" ]]; then die "The '--install' command requires a version. Available: $(get_all_versions | sed 's/ /, /g; s/, $//'), or all."; fi
+  [[ "$arg_ver" != 10 ]] || c_warn "Legacy Ansible 10/core 2.17 has known unpatched CVEs (including CVE-2026-11332)."
   if [[ "$arg_ver" == "all" ]]; then
     local major
     for major in $(get_all_versions); do _perform_install "$(get_version_data "$major")" "$major"; done
@@ -398,8 +514,7 @@ handle_reinstall() {
     for major in $(get_all_versions); do
       version_data=$(get_version_data "$major")
       parse_version_string "$version_data"
-      _remove_environment_dir "ansible-${ansible_ver}"
-      _perform_install "$version_data" "$major"
+      _perform_install "$version_data" "$major" true
     done
   else
     local version_data ansible_ver core_ver lint_ver mitogen_ver python_ver
@@ -407,8 +522,8 @@ handle_reinstall() {
     parse_version_string "$version_data"
     c_warn "This will remove and rebuild ansible-${ansible_ver}."
     confirm_reinstall "ansible-${ansible_ver}"
-    _remove_environment_dir "ansible-${ansible_ver}"
-    _perform_install "$version_data" "$arg_ver"
+    [[ "$arg_ver" != 10 ]] || c_warn "Legacy Ansible 10/core 2.17 has known unpatched CVEs (including CVE-2026-11332)."
+    _perform_install "$version_data" "$arg_ver" true
   fi
   c_ok "✅ Reinstall complete."
 }
@@ -416,6 +531,7 @@ handle_reinstall() {
 handle_install_custom() {
   local key_to_install="${1:-}"
   if [[ -z "$key_to_install" ]]; then die "The '--install-custom' command requires a key."; fi
+  [[ "$key_to_install" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ && ${#key_to_install} -le 80 ]] || die "Invalid custom key."
   if [[ ${#AMVM_CUSTOM_VERSIONS[@]} -eq 0 ]]; then die "No custom versions defined in ~/.amvm.cfg via AMVM_CUSTOM_VERSIONS array."; fi
   local version_string=""
   local item
@@ -423,29 +539,95 @@ handle_install_custom() {
     if [[ "${item%%:*}" == "$key_to_install" ]]; then version_string="${item#*:}"; break; fi
   done
   if [[ -z "$version_string" ]]; then die "Custom version key '$key_to_install' not found in ~/.amvm.cfg."; fi
-  _perform_install "$version_string" "$key_to_install"
+  _perform_install "$version_string" "$key_to_install" false true
   c_ok "✅ Custom installation complete."
 }
 
-_link_ansible_shims() {
-  local venv_dir="$1"
-  local shim_dir="$AMVM_ROOT/bin"
-  mkdir -p "$shim_dir"
-  rm -f "$shim_dir"/ansible*
-  local venv_bin="$venv_dir/bin"
-  while IFS= read -r -d '' exe; do
-    local shim="$shim_dir/$(basename "$exe")"
-    local quoted_venv_bin quoted_exe
-    printf -v quoted_venv_bin "%q" "$venv_bin"
-    printf -v quoted_exe "%q" "$exe"
-    cat <<EOL >"$shim"
-#!/usr/bin/env bash
-export PATH=${quoted_venv_bin}:\${PATH}
-exec ${quoted_exe} "\$@"
+_render_shim() {
+  printf '#!/usr/bin/env bash\n# amvm dispatcher\n'
+  # shellcheck disable=SC2016
+  printf 'config=$(readlink %q) || exit 1\n' "$AMVM_ROOT/.amvm-active"
+  cat <<'EOL'
+venv=${config%/*}
+if [[ "${config##*/}" != ansible-project.cfg ]]; then export ANSIBLE_CONFIG="$config"; fi
+export PATH="$venv/bin:$PATH"
+exec "$venv/bin/${0##*/}" "$@"
 EOL
-    chmod +x "$shim"
-  done < <(find "$venv_dir/bin" -maxdepth 1 \( -type f -o -type l \) -name "ansible*" -print0)
 }
+
+_old_shim_matches() {
+  local file="$1" dir="$2" quoted_bin quoted_exe
+  if [[ -L "$file" ]]; then [[ "$(readlink "$file")" == "$dir/bin/${file##*/}" ]]; return; fi
+  [[ -f "$file" ]] || return 1
+  printf -v quoted_bin '%q' "$dir/bin"
+  printf -v quoted_exe '%q' "$dir/bin/${file##*/}"
+  # shellcheck disable=SC2016
+  cmp -s "$file" <(printf '#!/usr/bin/env bash\nexport PATH=%s:${PATH}\nexec %s "$@"\n' "$quoted_bin" "$quoted_exe")
+}
+
+_owned_shim() {
+  local name
+  if [[ -f "$1" && ! -L "$1" ]] && cmp -s "$1" <(_render_shim); then return 0; fi
+  while IFS= read -r name; do
+    if _old_shim_matches "$1" "$AMVM_ROOT/$name"; then return 0; fi
+  done < <(_get_installed_versions)
+  return 1
+}
+
+_active_environment() {
+  local name
+  if [[ -L "$AMVM_ROOT/.amvm-active" ]]; then dirname "$(readlink "$AMVM_ROOT/.amvm-active")"; return; fi
+  while IFS= read -r name; do
+    if _old_shim_matches "$AMVM_ROOT/bin/ansible" "$AMVM_ROOT/$name"; then printf '%s\n' "$AMVM_ROOT/$name"; return; fi
+  done < <(_get_installed_versions)
+}
+
+_remove_owned_shims() {
+  local file
+  for file in "$AMVM_ROOT/bin/"ansible*; do
+    if _owned_shim "$file"; then rm -f "$file"; fi
+  done
+}
+
+_link_ansible_shims() (
+  local venv_dir="$1" target_cfg="$2" shim_dir="$AMVM_ROOT/bin" exe shim previous
+  local temporary
+  mkdir -p "$shim_dir"
+  temporary=$(mktemp -d "$AMVM_ROOT/.amvm-switch.XXXXXX")
+  trap 'rm -rf "$temporary"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [[ -e "$AMVM_ROOT/.amvm-active" || -L "$AMVM_ROOT/.amvm-active" ]]; then
+    [[ -L "$AMVM_ROOT/.amvm-active" && ! -d "$AMVM_ROOT/.amvm-active" ]] || die "Unrecognized .amvm-active; refusing to overwrite it."
+    if ! _managed_environment "$(_active_environment)"; then
+      [[ -f "$shim_dir/ansible" && ! -L "$shim_dir/ansible" ]] || die "Unrecognized active environment; refusing to overwrite it."
+      cmp -s "$shim_dir/ansible" <(_render_shim) || die "Unrecognized active environment; refusing to overwrite it."
+    fi
+  fi
+  while IFS= read -r -d '' exe; do
+    shim="$shim_dir/${exe##*/}"
+    if [[ -e "$shim" || -L "$shim" ]]; then _owned_shim "$shim" || die "Refusing to overwrite user file: $shim"; fi
+    _render_shim >"$temporary/${exe##*/}"
+    chmod +x "$temporary/${exe##*/}"
+  done < <(find "$venv_dir/bin" -maxdepth 1 \( -type f -o -type l \) -name 'ansible*' -print0)
+  # Migrate owned commands even when the new environment omits that executable.
+  for shim in "$shim_dir/"ansible*; do
+    if [[ ! -f "$temporary/${shim##*/}" ]] && _owned_shim "$shim"; then
+      _render_shim >"$temporary/${shim##*/}"
+      chmod +x "$temporary/${shim##*/}"
+    fi
+  done
+  # Preserve the old selection while migrating the 2.0 wrappers.
+  previous=$(_active_environment)
+  if [[ ! -L "$AMVM_ROOT/.amvm-active" && -n "$previous" ]]; then
+    ln -s "$previous/ansible-project.cfg" "$AMVM_ROOT/.amvm-active"
+  fi
+  for shim in "$temporary/"ansible*; do
+    if [[ ! -x "$shim_dir/${shim##*/}" ]] || ! cmp -s "$shim" "$shim_dir/${shim##*/}"; then mv -f "$shim" "$shim_dir/${shim##*/}"; fi
+  done
+  ln -s "$target_cfg" "$temporary/active"
+  mv -f "$temporary/active" "$AMVM_ROOT/.amvm-active"
+)
 
 handle_switch() {
   local installed_versions_str
@@ -461,40 +643,49 @@ handle_switch() {
   local choices=()
   local v
   for v in "${dirs[@]}"; do
-    choices+=("$v")
+    choices+=("$v" "$v (project)")
     if [[ -f "$AMVM_ROOT/$v/ansible-mitogen.cfg" ]]; then choices+=("$v (mitogen)"); fi
     if [[ -f "$AMVM_ROOT/$v/ansible-customized.cfg" ]]; then choices+=("$v (custom)"); fi
   done
   local selection
   if command -v fzf >/dev/null 2>&1; then
-    selection=$(printf "%s\n" "${choices[@]}" | fzf --height=15 --reverse --prompt="amvm> ")
+    selection=$(printf "%s\n" "${choices[@]}" | fzf --height=15 --reverse --prompt="amvm> ") || { local status=$?; [[ "$status" == 1 || "$status" == 130 ]] && return 0; return "$status"; }
   else
     local i
     for i in "${!choices[@]}"; do printf "  %2d) %s\n" "$((i + 1))" "${choices[i]}"; done
     local num_selection
     read -r -p "Enter a number: " num_selection
-    if ! [[ "$num_selection" =~ ^[0-9]+$ && "$num_selection" -ge 1 && "$num_selection" -le ${#choices[@]} ]]; then die "Invalid selection."; fi
+    [[ "$num_selection" =~ ^[0-9]+$ && ${#num_selection} -le 6 ]] || die "Invalid selection."
+    num_selection=$((10#$num_selection))
+    if ! [[ "$num_selection" -ge 1 && "$num_selection" -le ${#choices[@]} ]]; then die "Invalid selection."; fi
     selection="${choices[num_selection - 1]}"
   fi
   if [[ -z "$selection" ]]; then c_info "✋ Selection cancelled."; exit 0; fi
-  local use_mitogen=false; local use_custom=false; local base_name="$selection"
+  local use_mitogen=false; local use_custom=false; local use_project=false; local base_name="$selection"
   if [[ "$selection" == *"(mitogen)" ]]; then use_mitogen=true; base_name="${selection% (mitogen)}"; fi
   if [[ "$selection" == *"(custom)" ]]; then use_custom=true; base_name="${selection% (custom)}"; fi
+  if [[ "$selection" == *"(project)" ]]; then use_project=true; base_name="${selection% (project)}"; fi
   local venv_dir="$AMVM_ROOT/$base_name"
-  [[ -d "$venv_dir" ]] || die "Environment directory not found: $venv_dir"
+  _managed_environment "$venv_dir" || die "Managed environment not found: $venv_dir"
   local target_cfg
   if [[ "$use_custom" == true ]]; then target_cfg="$venv_dir/ansible-customized.cfg";
   elif [[ "$use_mitogen" == true ]]; then target_cfg="$venv_dir/ansible-mitogen.cfg";
   else target_cfg="$venv_dir/ansible.cfg"; fi
-  [[ -f "$target_cfg" ]] || die "Config file not found: $target_cfg"
-  ln -sf "$target_cfg" "$HOME/.ansible.cfg"
-  _link_ansible_shims "$venv_dir"
+  if [[ "$use_project" == true ]]; then "$venv_dir/bin/ansible" --version >/dev/null;
+  else
+    [[ -f "$target_cfg" ]] || die "Config file not found: $target_cfg"
+    ANSIBLE_CONFIG="$target_cfg" "$venv_dir/bin/ansible" --version >/dev/null
+  fi
+  if [[ "$use_project" == true ]]; then target_cfg="$venv_dir/ansible-project.cfg"; fi
+  _link_ansible_shims "$venv_dir" "$target_cfg"
   local suffix=""
   if [[ "$use_custom" == true ]]; then suffix=" (custom)"; fi
   if [[ "$use_mitogen" == true ]]; then suffix=" (mitogen)"; fi
+  if [[ "$use_project" == true ]]; then suffix=" (project)"; fi
   c_ok "✅ Switched to '$base_name'$suffix"
-  printf "   %-20s -> %s\n" "~/.ansible.cfg" "$(readlink -f "$HOME/.ansible.cfg" 2>/dev/null || readlink "$HOME/.ansible.cfg")"
-  printf "   %-20s -> %s\n" "ansible --version" "$(ansible --version | head -n1)"
+  if [[ "$use_project" == true ]]; then c_info "Configuration: native Ansible discovery (ANSIBLE_CONFIG, project, home, system).";
+  else printf "   ANSIBLE_CONFIG -> %s\n" "$target_cfg"; fi
+  "$AMVM_ROOT/bin/ansible" --version
 }
 
 handle_uninstall() {
@@ -507,33 +698,22 @@ handle_uninstall() {
   c_info "Select an environment to uninstall:"
   local version_to_remove
   if command -v fzf >/dev/null 2>&1; then
-    version_to_remove=$(printf "%s\n" "${choices[@]}" | fzf --height=15 --reverse --prompt="uninstall> ")
+    version_to_remove=$(printf "%s\n" "${choices[@]}" | fzf --height=15 --reverse --prompt="uninstall> ") || { local status=$?; [[ "$status" == 1 || "$status" == 130 ]] && return 0; return "$status"; }
   else
     local i
     for i in "${!choices[@]}"; do printf "  %2d) %s\n" "$((i + 1))" "${choices[i]}"; done
     local num_selection
     read -r -p "Enter a number: " num_selection
-    if ! [[ "$num_selection" =~ ^[0-9]+$ && "$num_selection" -ge 1 && "$num_selection" -le ${#choices[@]} ]]; then die "Invalid selection."; fi
+    [[ "$num_selection" =~ ^[0-9]+$ && ${#num_selection} -le 6 ]] || die "Invalid selection."
+    num_selection=$((10#$num_selection))
+    if ! [[ "$num_selection" -ge 1 && "$num_selection" -le ${#choices[@]} ]]; then die "Invalid selection."; fi
     version_to_remove="${choices[num_selection - 1]}"
   fi
   if [[ -z "$version_to_remove" ]]; then c_info "✋ Uninstall cancelled."; exit 0; fi
   local response
   read -r -p "Are you sure you want to PERMANENTLY remove '$version_to_remove'? [y/N] " response
   if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then c_info "✋ Uninstall cancelled."; exit 0; fi
-  local venv_dir="$AMVM_ROOT/$version_to_remove"
-  local shim_dir="$AMVM_ROOT/bin"
-  local was_active=false
-  if [[ -L "$shim_dir/ansible" ]] && [[ "$(readlink "$shim_dir/ansible")" == *"/$version_to_remove/"* ]]; then
-    was_active=true
-  fi
-  c_info "Removing environment: $version_to_remove..."
-  rm -rf "$venv_dir"
-  if [[ "$was_active" == true ]]; then
-    c_warn "The active version was removed. Cleaning up shims and config."
-    rm -f "$shim_dir"/ansible*
-    rm -f "$HOME/.ansible.cfg"
-    c_warn "Run 'amvm' again to switch to another installed version."
-  fi
+  _remove_environment_dir "$version_to_remove"
   c_ok "✅ Environment '$version_to_remove' has been removed."
 }
 
@@ -554,32 +734,52 @@ handle_list() {
 }
 
 handle_cleanup() {
-  local installed_versions_str
+  local installed_versions_str file found=false
   installed_versions_str=$(_get_installed_versions)
-  if [[ ! -d "$AMVM_ROOT" ]] || [[ -z "$installed_versions_str" && -z "$(ls -A "$AMVM_ROOT/bin" 2>/dev/null)" ]]; then
-      c_warn "⚠️  Nothing to clean up. Directory '$AMVM_ROOT' is empty or does not exist."
-      rm -f "$HOME/.ansible.cfg"
-      exit 0
+  if [[ -n "$installed_versions_str" ]]; then
+    c_warn "Environments and their contents to remove:"
+    printf '%s\n' "$installed_versions_str"
+    found=true
   fi
-  c_warn "The following items will be PERMANENTLY REMOVED:"
-  if [[ -n "$installed_versions_str" ]]; then echo "$installed_versions_str" | sed "s#^#  - Environment: #"; fi
-  echo "  - Shims directory: $AMVM_ROOT/bin"
-  if [[ -e "$HOME/.ansible.cfg" ]]; then echo "  - Ansible config symlink: $HOME/.ansible.cfg"; fi
-  echo
+  for file in "$AMVM_ROOT/bin/"ansible*; do
+    if _owned_shim "$file"; then printf 'Managed shim: %s\n' "$file"; found=true; fi
+  done
+  if [[ "$found" != true ]]; then c_info "Nothing managed by amvm to clean up."; return; fi
   local response
-  read -r -p "Are you sure you want to remove all of the above? [y/N] " response
-  if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then c_info "✋ Cleanup cancelled."; exit 0; fi
-  c_info "Removing directory $AMVM_ROOT..."
-  rm -rf "$AMVM_ROOT"
-  c_info "Removing config file ~/.ansible.cfg..."
-  rm -f "$HOME/.ansible.cfg"
+  read -r -p "Remove the listed amvm data? Unrelated files will be retained. [y/N] " response
+  if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then c_info "✋ Cleanup cancelled."; return; fi
+  _remove_owned_shims
+  if [[ -n "$installed_versions_str" ]]; then
+    while IFS= read -r file; do _remove_environment_dir "$file"; done <<<"$installed_versions_str"
+  fi
+  rmdir "$AMVM_ROOT/bin" 2>/dev/null || true
   c_ok "✅ Cleanup complete."
   c_warn "Don't forget to remove the amvm PATH export from your shell profile."
 }
 
 main() {
   load_config
+  AMVM_UV_PID=""
   local command=${1:-}
+  case "$command" in
+    --install|--reinstall|--install-custom) [[ $# -eq 2 ]] || die "$command requires exactly one version argument.";;
+    *) [[ $# -le 1 ]] || die "Unexpected arguments for '$command'.";;
+  esac
+  case "$command" in
+    --install|--reinstall|--install-custom) mkdir -p "$AMVM_ROOT";;
+  esac
+  case "$command" in
+    --install|--reinstall|--install-custom|--uninstall|--cleanup|''|switch)
+      if [[ -d "$AMVM_ROOT" ]]; then
+        AMVM_ROOT=$(cd "$AMVM_ROOT" && pwd -P)
+        [[ -O "$AMVM_ROOT" && "$AMVM_ROOT" != / && "$AMVM_ROOT" != "$(cd "$HOME" && pwd -P)" ]] || die "Unsafe AMVM_ROOT."
+        mkdir "$AMVM_ROOT/.amvm-lock" 2>/dev/null || die "Another operation holds $AMVM_ROOT/.amvm-lock; remove a stale lock only after its process exits."
+        trap _release_lock EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        printf '%s\n' "$$" >"$AMVM_ROOT/.amvm-lock/pid"
+      fi;;
+  esac
   case "$command" in
     --install|--install-custom|--reinstall|--uninstall|--list|--cleanup|--matrix|-h|--help|-v|--version) ;;
     *) check_path_and_warn;;

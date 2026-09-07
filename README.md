@@ -30,8 +30,8 @@ It's more than just a `venv` wrapper; it's a complete management tool that lets 
 -   💻 **Fast Interactive UI**: Switch between any version and config combination in seconds using a modern, interactive menu powered by `fzf` (if installed), with a simple numbered menu as a fallback.
 
 -   ⚡ **Integrated Mitogen & Custom Configs**:
-    -   **Mitogen Support**: `amvm` automatically creates a Mitogen-ready configuration when installed. This appears as a separate option in the menu (e.g., `ansible-14.1.0 (mitogen)`), letting you enable or disable Mitogen with a single keystroke.
-    -   **Per-Environment Configs**: Drop an `ansible-customized.cfg` file into any version's directory, and `amvm` automatically offers it as a switching option (e.g., `ansible-14.1.0 (custom)`) - perfect for project-specific settings.
+    -   **Mitogen Support**: `amvm` automatically creates a Mitogen-ready configuration when installed. This appears as a separate option in the menu (e.g., `ansible-14.3.1 (mitogen)`), letting you enable or disable Mitogen with a single keystroke.
+    -   **Per-Environment Configs**: Drop an `ansible-customized.cfg` file into any version's directory, and `amvm` automatically offers it as a switching option (e.g., `ansible-14.3.1 (custom)`) - perfect for project-specific settings.
 
 -   🔧 **Extensive Customization**:
     -   **Custom Versions**: Easily define your own version sets (Ansible, ansible-core, ansible-lint, Mitogen, and optional Python) in a simple configuration file (`~/.amvm.cfg`).
@@ -42,11 +42,11 @@ It's more than just a `venv` wrapper; it's a complete management tool that lets 
 -   🛡️ **Safe and Clean Management**:
     -   **Isolated Environments**: Each version lives in its own uv-created virtual environment, preventing dependency conflicts.
     -   **Metadata & Stale Detection**: amvm 2.0 writes `.amvm.env` metadata into each environment and can identify old or mismatched environments.
-    -   **Reinstall Support**: `amvm --reinstall <ver|all>` removes and rebuilds built-in environments after confirmation.
+    -   **Reinstall Support**: `amvm --reinstall <ver|all>` rebuilds built-in environments after confirmation, preserving custom configs and restoring the old environment on failure.
     -   **Interactive Uninstall**: Safely remove specific versions with a confirmation prompt.
     -   **Total Cleanup**: A single `amvm --cleanup` command interactively removes all `amvm`-managed files and directories.
 
--   🏠 **Self-Contained**: All environments, shims, metadata, and configurations are stored in a single directory (`~/.amvm` by default), making backups or removal trivial.
+-   🏠 **Central Storage**: Environments, shims, metadata, and configs live under `~/.amvm` by default. Their Python interpreters are stored separately by uv; copying AMVM_ROOT alone is not a portable backup.
 
 ## Prerequisites
 -   **Compatibility**: Works on **Linux** and **macOS**.
@@ -66,19 +66,17 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 | Key |  `ansible` | `ansible-core` | `ansible-lint` | `mitogen` | `python` | Notes |
 |:---:|:----------:|:--------------:|:--------------:|:---------:|:--------:|:------|
-| `10` |  `10.7.0`  |    `2.17.14`   |    `25.8.2`    |  `0.3.50` |  `3.12`  | EOL; final 10.x package |
-| `11` |  `11.13.0` |    `2.18.18`   |    `25.11.0`   |  `0.3.50` |  `3.12`  | EOL Dec 2025; strict-era lint |
-| `12` |  `12.3.0`  |    `2.19.11`   |    `26.4.0`    |  `0.3.50` |  `3.12`  | EOL Dec 2025; strict-era lint |
-| `13` |  `13.8.0`  |    `2.20.7`    |    `26.6.0`    |  `0.3.50` |  `3.12`  | Final Ansible 13/core 2.20 line |
-| `14` |  `14.1.0`  |    `2.21.1`    |    `26.6.0`    |  `0.3.50` |  `3.12`  | Current tested Ansible 14/core 2.21 line |
+| `10` | `10.7.0` | `2.17.14` | `25.8.2` | `0.3.53` | `3.12.13` | Legacy; known unpatched CVEs; excluded from `all` |
+| `11` | `11.13.0` | `2.18.19` | `26.8.0` | `0.3.53` | `3.12.13` | Community EOL; core EOL May 2026 |
+| `12` | `12.3.0` | `2.19.12` | `26.8.0` | `0.3.53` | `3.12.13` | Community EOL; core security fixes until Nov 2026 |
+| `13` | `13.8.0` | `2.20.8` | `26.8.0` | `0.3.53` | `3.12.13` | Final community package; core EOL May 2027 |
+| `14` | `14.3.1` | `2.21.3` | `26.8.0` | `0.3.53` | `3.12.13` | Current community package; core EOL Nov 2027 |
 
 Print the built-in matrix from the CLI:
 
 ```bash
 amvm --matrix
 ```
-
-Compatibility was checked against Ansible release maintenance data, PyPI package metadata, Ansible 14.1.0 release notes, and Mitogen 0.3.50 release notes.
 
 ---
 
@@ -131,14 +129,14 @@ Use the `amvm --install` command. You can install a specific predefined version 
 # Install a specific built-in version (e.g., 14)
 amvm --install 14
 
-# Install all available built-in versions
+# Install built-in versions 11–14 (excludes vulnerable legacy 10)
 amvm --install all
 ```
 
 ### 2. Reinstall an Existing Environment
 Use `amvm --reinstall` when an old environment already exists but the matrix changed.
 
-This is especially useful when upgrading from amvm 1.x, because old environments were created with system Python and do not contain amvm 2.0 metadata.
+Directories without recognized amvm metadata are left untouched; back them up and move them out of the way before installing at the same path.
 
 ```bash
 # Rebuild one built-in environment
@@ -148,7 +146,7 @@ amvm --reinstall 14
 amvm --reinstall all
 ```
 
-You will be asked for confirmation before anything is removed.
+You will be asked for confirmation before rebuilding. Pause Ansible jobs using that environment while it is rebuilt at its original path. A failed install restores the previous directory; a successful one retains `ansible-customized.cfg`. An interrupted process that cannot run cleanup (for example, SIGKILL) may leave `.amvm-reinstall.*/environment` and `.amvm-lock`; recover the backup before retrying.
 
 ### 3. Switch the Active Version (it's not activated by default)
 Run `amvm` with no arguments to open the interactive selection menu.
@@ -157,8 +155,8 @@ Run `amvm` with no arguments to open the interactive selection menu.
 ```
 amvm>
 ┌───────────────────────────┐
-│ > ansible-14.1.0 (mitogen)│
-│   ansible-14.1.0          │
+│ > ansible-14.3.1 (mitogen)│
+│   ansible-14.3.1          │
 │   ansible-13.8.0 (mitogen)│
 │   ansible-13.8.0 (custom) │
 │   ansible-13.8.0          │
@@ -167,21 +165,25 @@ amvm>
 
 **Without `fzf` (fallback):**
 ```
-   1) ansible-14.1.0 (mitogen)
-   2) ansible-14.1.0
-   3) ansible-13.8.0 (mitogen)
-   4) ansible-13.8.0 (custom)
-   5) ansible-13.8.0
+   1) ansible-14.3.1
+   2) ansible-14.3.1 (project)
+   3) ansible-14.3.1 (mitogen)
+   4) ansible-13.8.0
+   5) ansible-13.8.0 (project)
+   6) ansible-13.8.0 (mitogen)
+   7) ansible-13.8.0 (custom)
 Enter a number: _
 ```
 
 After switching, you can immediately verify the change:
 ```bash
 $ ansible --version
-ansible [core 2.21.1]
-  config file = /home/user/.ansible.cfg
+ansible [core 2.21.3]
+  config file = /home/user/.amvm/ansible-14.3.1/ansible-mitogen.cfg
   ...
 ```
+
+Standard, `(mitogen)`, and `(custom)` selections explicitly set `ANSIBLE_CONFIG`, taking precedence over project configs and an inherited `ANSIBLE_CONFIG`. Select `(project)` to keep native Ansible configuration discovery. Switching never creates or overwrites `~/.ansible.cfg`. Generated configs use in-memory fact caching, so separate projects do not share cached host facts. Reinstall older environments to regenerate their configs.
 
 ### 4. Print the Built-in Matrix
 Use `amvm --matrix` to inspect the currently built-in compatibility table.
@@ -196,7 +198,7 @@ Use `amvm --uninstall` to open an interactive menu to select and remove a versio
 ```
 uninstall>
 ┌──────────────────┐
-│ > ansible-14.1.0 │
+│ > ansible-14.3.1 │
 │   ansible-13.8.0 │
 └──────────────────┘
 ```
@@ -208,11 +210,11 @@ You will be asked for confirmation before anything is deleted.
 ```bash
 amvm --matrix                         # Print the built-in compatibility matrix
 amvm --install <10|11|12|13|14|all>   # Install a built-in version or all
-amvm --reinstall <10|11|12|13|14|all> # Remove and reinstall a built-in version or all
+amvm --reinstall <10|11|12|13|14|all> # Rebuild with rollback; all excludes 10
 amvm --install-custom <key>           # Install a user-defined version from your config
 amvm --uninstall                      # Interactively remove an installed version
 amvm --list                           # List all installed versions and stale status
-amvm --cleanup                        # Interactively remove ALL amvm data
+amvm --cleanup                        # Remove recognized amvm data; keep unrelated files
 amvm --help, -h                       # Show the help message
 amvm --version, -v                    # Show amvm version
 ```
@@ -221,7 +223,7 @@ amvm --version, -v                    # Show amvm version
 
 ## Customization
 
-You can configure `amvm` by creating a file at `~/.amvm.cfg`.
+You can configure `amvm` by creating a Bash file at `~/.amvm.cfg`, or selecting one with `AMVM_CONFIG_FILE`. Only load config files you trust.
 
 ### 1. Defining Custom Versions
 
@@ -236,18 +238,17 @@ The final `python` field is optional for backward compatibility. If omitted, `am
 ```bash
 # Define your custom versions here
 AMVM_CUSTOM_VERSIONS=(
-  # Key '9': Ansible 9 with Mitogen, no ansible-lint, and Python 3.11
-  "9:9.13.0|2.16.14|0|0.3.50|3.11"
   # Key '14-no-lint': Ansible 14 without optional packages
-  "14-no-lint:14.1.0|2.21.1|0|0"
+  "14-no-lint:14.3.1|2.21.3|0|0|3.12.13"
 )
 ```
 
 With this config, you can now run:
 ```bash
-amvm --install-custom 9
 amvm --install-custom 14-no-lint
 ```
+
+Custom sets use `ansible-X.Y.Z-custom-KEY/`, allowing multiple sets with the same Ansible version alongside the built-in environment.
 
 ### 2. Using a Custom `ansible.cfg`
 
@@ -272,9 +273,10 @@ AMVM_ROOT="/opt/ansible_versions"
 ## How It Works
 
 -   **`~/.amvm/`**: The root directory for everything `amvm` manages.
-    -   `ansible-X.Y.Z/`: Each environment is a self-contained uv-created virtual environment. It contains `ansible.cfg`, `ansible-mitogen.cfg` (if applicable), your own `ansible-customized.cfg`, and `.amvm.env` metadata.
+    -   `ansible-X.Y.Z/`: Each environment is a uv-created virtual environment referencing an external uv-managed Python. It contains `ansible.cfg`, `ansible-mitogen.cfg` (if applicable), your own `ansible-customized.cfg`, and `.amvm.env` metadata.
     -   `bin/`: This directory contains the active "shims" - small wrapper scripts that prepend the active environment's `bin` directory to `PATH` and then execute the matching `ansible*` command. This is the directory you add to your `PATH`.
--   **`~/.ansible.cfg`**: This is not a real file, but a symlink that always points to the active configuration file (`ansible.cfg`, `ansible-mitogen.cfg`, or `ansible-customized.cfg`) inside the active environment.
+-   **`~/.amvm/.amvm-active`**: A symlink to the selected config. Stable shims read this pointer once to select both the environment and config. Switching replaces the pointer atomically; a mutation lock prevents overlapping amvm operations.
+-   **`~/.ansible.cfg`**: Left unchanged when switching. Uninstall/cleanup removes an old amvm symlink only when it points into the recognized environment being deleted. Unrelated files in AMVM_ROOT and user-modified shims are retained.
 
 This shim-based approach is what makes switching seamless and eliminates the need to `source` or `deactivate` environments.
 
@@ -293,3 +295,6 @@ This shim-based approach is what makes switching seamless and eliminates the nee
 
 -   **Existing environment is skipped**
     If an environment already exists but does not match the current matrix, use `amvm --reinstall <key>`.
+
+-   **Mitogen fails on a Python path containing spaces or quotes**
+    Mitogen parses `ansible_python_interpreter` as shell syntax, while standard Ansible treats it as a path. For an inventory used with both strategies, select a Python path without spaces or shell quotes. This also affects implicit localhost when the environment's path contains these characters.
